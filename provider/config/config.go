@@ -29,7 +29,7 @@ func SetupConfig(nickname, folder, hubAddress string) {
 	}
 	provider.ProviderFolder = folder
 	provider.HubAddress = strings.TrimSuffix(hubAddress, "/")
-	if !strings.HasSuffix(provider.WdaBundleID, ".xctrunner") {
+	if !strings.Contains(provider.WdaBundleID, ".xctrunner") {
 		provider.WdaBundleID = fmt.Sprintf("%s.xctrunner", provider.WdaBundleID)
 	}
 

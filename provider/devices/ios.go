@@ -259,10 +259,14 @@ func (d *IOSDevice) startWebDriverAgent() error {
 		return fmt.Errorf("iOS 17.0-17.3 is not supported - upgrade the device to iOS 17.4+")
 	}
 
-	if err := d.installApp(fmt.Sprintf("%s/WebDriverAgent.ipa", config.ProviderConfig.ProviderFolder)); err != nil {
-		logger.ProviderLogger.LogError("ios_device_setup", fmt.Sprintf("Could not install WebDriverAgent on device `%s` - %s", d.GetUDID(), err))
-		d.Reset("Failed to install WebDriverAgent on device.")
-		return err
+	if os.Getenv("GADS_SKIP_WDA_INSTALL") == "true" {
+		logger.ProviderLogger.LogInfo("ios_device_setup", fmt.Sprintf("Skipping WebDriverAgent install for device `%s` because GADS_SKIP_WDA_INSTALL=true", d.GetUDID()))
+	} else {
+		if err := d.installApp(fmt.Sprintf("%s/WebDriverAgent.ipa", config.ProviderConfig.ProviderFolder)); err != nil {
+			logger.ProviderLogger.LogError("ios_device_setup", fmt.Sprintf("Could not install WebDriverAgent on device `%s` - %s", d.GetUDID(), err))
+			d.Reset("Failed to install WebDriverAgent on device.")
+			return err
+		}
 	}
 	go d.runWDA()
 	return nil

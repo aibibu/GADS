@@ -85,6 +85,63 @@ func wdaRequest(dev devices.PlatformDevice, method, endpoint string, requestBody
 	return controlNetClient.Do(req)
 }
 
+func wdaWindowSize(dev devices.PlatformDevice) (float64, float64, error) {
+	resp, err := wdaRequest(dev, http.MethodGet, "window/size", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, 0, fmt.Errorf("wda window size returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sizeResponse struct {
+		Value struct {
+			Width  float64 `json:"width"`
+			Height float64 `json:"height"`
+		} `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sizeResponse); err != nil {
+		return 0, 0, err
+	}
+
+	if sizeResponse.Value.Width <= 0 || sizeResponse.Value.Height <= 0 {
+		return 0, 0, fmt.Errorf("invalid WDA window size %.2fx%.2f", sizeResponse.Value.Width, sizeResponse.Value.Height)
+	}
+
+	return sizeResponse.Value.Width, sizeResponse.Value.Height, nil
+}
+
+func iosWDACoordinates(dev devices.PlatformDevice, x, y float64) (float64, float64, error) {
+	device := dev.GetDBDevice()
+	screenWidth, err := strconv.ParseFloat(device.ScreenWidth, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid screen width %q: %w", device.ScreenWidth, err)
+	}
+	screenHeight, err := strconv.ParseFloat(device.ScreenHeight, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid screen height %q: %w", device.ScreenHeight, err)
+	}
+
+	wdaWidth, wdaHeight, err := wdaWindowSize(dev)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	scaleX := screenWidth / wdaWidth
+	scaleY := screenHeight / wdaHeight
+	if scaleX <= 1.01 {
+		scaleX = 1
+	}
+	if scaleY <= 1.01 {
+		scaleY = 1
+	}
+
+	return x / scaleX, y / scaleY, nil
+}
+
 func deviceLock(dev devices.PlatformDevice, lock string) (*http.Response, error) {
 	if dev.GetOS() == "ios" {
 		return wdaRequest(dev, http.MethodPost, "wda/"+lock, nil)
@@ -94,6 +151,14 @@ func deviceLock(dev devices.PlatformDevice, lock string) (*http.Response, error)
 }
 
 func deviceTap(dev devices.PlatformDevice, x float64, y float64) (*http.Response, error) {
+	var err error
+	if dev.GetOS() == "ios" {
+		x, y, err = iosWDACoordinates(dev, x, y)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	requestBody := struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
@@ -115,6 +180,11 @@ func deviceTap(dev devices.PlatformDevice, x float64, y float64) (*http.Response
 
 func deviceTouchAndHold(dev devices.PlatformDevice, x float64, y float64, duration float64) (*http.Response, error) {
 	if dev.GetOS() == "ios" {
+		var err error
+		x, y, err = iosWDACoordinates(dev, x, y)
+		if err != nil {
+			return nil, err
+		}
 		duration = float64(duration) / 1000
 	}
 	requestBody := struct {
@@ -175,6 +245,16 @@ func deviceScreenshot(dev devices.PlatformDevice) (string, error) {
 
 func deviceSwipe(dev devices.PlatformDevice, x, y, endX, endY float64) (*http.Response, error) {
 	if dev.GetOS() == "ios" {
+		var err error
+		x, y, err = iosWDACoordinates(dev, x, y)
+		if err != nil {
+			return nil, err
+		}
+		endX, endY, err = iosWDACoordinates(dev, endX, endY)
+		if err != nil {
+			return nil, err
+		}
+
 		requestBody := struct {
 			X     float64 `json:"startX"`
 			Y     float64 `json:"startY"`
@@ -217,6 +297,12 @@ func deviceSwipe(dev devices.PlatformDevice, x, y, endX, endY float64) (*http.Re
 
 func devicePinch(dev devices.PlatformDevice, x, y, scale float64) (*http.Response, error) {
 	if dev.GetOS() == "ios" {
+		var err error
+		x, y, err = iosWDACoordinates(dev, x, y)
+		if err != nil {
+			return nil, err
+		}
+
 		requestBody := struct {
 			CenterX    float64 `json:"centerX"`
 			CenterY    float64 `json:"centerY"`
@@ -262,6 +348,14 @@ func devicePinch(dev devices.PlatformDevice, x, y, scale float64) (*http.Respons
 }
 
 func deviceDoubleTap(dev devices.PlatformDevice, x, y float64) (*http.Response, error) {
+	var err error
+	if dev.GetOS() == "ios" {
+		x, y, err = iosWDACoordinates(dev, x, y)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	requestBody := struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
@@ -291,8 +385,10 @@ func deviceHome(dev devices.PlatformDevice) (*http.Response, error) {
 
 func iOSAppSwitcher(dev devices.PlatformDevice) (*http.Response, error) {
 	if dev.GetOS() == "ios" {
-		w, _ := strconv.ParseFloat(dev.GetDBDevice().ScreenWidth, 64)
-		h, _ := strconv.ParseFloat(dev.GetDBDevice().ScreenHeight, 64)
+		w, h, err := wdaWindowSize(dev)
+		if err != nil {
+			return nil, err
+		}
 		body := map[string]float64{"screenWidth": w, "screenHeight": h, "duration": 1}
 		data, err := json.Marshal(body)
 		if err != nil {
