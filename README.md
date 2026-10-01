@@ -23,6 +23,11 @@
 
 </div>
 
+## aibibu 本地手机控制与抓包
+
+中文操作说明：[iPhone 控制、Reqable 协同与代理抓包](./docs/phone-control-and-capture.zh-CN.md)。
+本地 Go 改动与说明保存在 `aibibu/phone-control` 分支；`main` 保留上游版本。
+
 ## 🎯 What is GADS?
 
 **GADS** is a free, open-source device farm platform that enables **remote device control** and **Appium test execution** on mobile devices (iOS/Android) and smart TVs (currently supporting Samsung Tizen OS and LG WebOS). Perfect for QA teams, mobile developers, and organizations looking for a self-hosted alternative to expensive cloud testing services like AWS Device Farm and Firebase Test Lab.
