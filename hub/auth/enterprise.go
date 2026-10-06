@@ -137,11 +137,8 @@ func EnterpriseGate() gin.HandlerFunc {
 		}
 		_, signedIn := e.session(c)
 		if path == "/" && (!signedIn || c.Query("native_login") != "1") {
-			if signedIn && c.Query("native_login") == "" {
-				c.Redirect(302, "/devices")
-				c.Abort()
-				return
-			}
+			// The enterprise cookie can outlive the native GADS inactivity session.
+			// A redirect to /devices here would loop after the UI discards its JWT.
 			c.Status(http.StatusOK)
 			staffPage(c, "Aibibu 设备中控", "使用现有 Aibibu 企业账号登录。", e.origin+"/enterprise/login")
 			c.Abort()

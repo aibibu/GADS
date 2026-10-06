@@ -94,4 +94,14 @@ func TestEnterpriseGateAndNativePasswordDisabled(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Aibibu 企业账号") {
 		t.Fatal("missing enterprise entry")
 	}
+	// An expired native JWT must be able to reach the sign-in landing page even
+	// while the independent, longer enterprise cookie is still valid.
+	Enterprise.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: time.Now().Add(time.Hour)}
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Header().Get("Location") != "" {
+		t.Fatal("native session expiry redirects in a loop")
+	}
 }
