@@ -437,6 +437,10 @@ func (d *AndroidDevice) startH264Stream() {
 }
 
 func (d *AndroidDevice) setupIME() error {
+	if config.AndroidPreserveIME {
+		d.AndroidIMEPort = ""
+		return nil
+	}
 	logger.ProviderLogger.LogInfof("android_device_setup", "Enabling GADS Android IME on device `%v`", d.GetUDID())
 	cmd := exec.CommandContext(d.Context, "adb", "-s", d.GetSerial(), "shell", "ime", "enable", "com.gads.settings/com.shamanec.settings.RemoteKeyboardIME")
 	if err := cmd.Run(); err != nil {
@@ -510,6 +514,9 @@ func (d *AndroidDevice) forwardStream() error {
 }
 
 func (d *AndroidDevice) forwardIME() error {
+	if config.AndroidPreserveIME {
+		return nil
+	}
 	return d.forwardPort("1993", d.AndroidIMEPort)
 }
 

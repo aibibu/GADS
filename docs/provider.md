@@ -49,9 +49,13 @@ and preserves manually installed helper packages. It never falls back to ADB
 installation when the helper is missing. Keep the device disabled until the
 manual installation is complete.
 
+Use `--android-preserve-ime` to keep the phone's current input method. This skips
+GADS keyboard setup and forwarding, so desktop text input through the GADS IME
+is unavailable. The phone's own keyboard remains usable.
+
 For a USB-connected phone, `--android-usb-only` also skips enabling ADB TCP mode
 and forwarding the remote ADB tunnel. GADS screen and control connections still
-use USB port forwarding. Both options default to false, so existing providers
+use USB port forwarding. All these options default to false, so existing providers
 retain their setup behavior. Android permissions and manufacturer restrictions
 still apply; these flags do not grant permissions.
 

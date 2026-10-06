@@ -16,8 +16,11 @@ import (
 func manualSetupFixture(t *testing.T, installed bool) (*AndroidDevice, string) {
 	t.Helper()
 	previousManual, previousUSB := config.AndroidManualAPKInstall, config.AndroidUSBOnly
+	previousIME := config.AndroidPreserveIME
 	config.AndroidManualAPKInstall, config.AndroidUSBOnly = true, true
+	config.AndroidPreserveIME = true
 	t.Cleanup(func() { config.AndroidManualAPKInstall, config.AndroidUSBOnly = previousManual, previousUSB })
+	t.Cleanup(func() { config.AndroidPreserveIME = previousIME })
 	dir := t.TempDir()
 	log := filepath.Join(dir, "commands.log")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GADS_TEST_ADB_LOG\"\n"
@@ -32,13 +35,13 @@ func manualSetupFixture(t *testing.T, installed bool) (*AndroidDevice, string) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GADS_TEST_ADB_LOG", log)
-	d := &AndroidDevice{RuntimeState: RuntimeState{Context: context.Background(), DBDevice: models.DBDevice{UDID: "test-device"}}, ADBPort: "43210"}
+	d := &AndroidDevice{RuntimeState: RuntimeState{Context: context.Background(), DBDevice: models.DBDevice{UDID: "test-device"}}, ADBPort: "43210", AndroidIMEPort: "43211"}
 	return d, log
 }
 
 func TestManualAndroidSetupKeepsInstalledHelperAndUSBConnection(t *testing.T) {
 	d, log := manualSetupFixture(t, true)
-	for _, action := range []func() error{d.cleanupOldApps, d.installGadsSettingsApp, d.enableADBTCPMode, d.forwardADB} {
+	for _, action := range []func() error{d.cleanupOldApps, d.installGadsSettingsApp, d.enableADBTCPMode, d.forwardADB, d.setupIME, d.forwardIME} {
 		if err := action(); err != nil {
 			t.Fatal(err)
 		}
@@ -52,6 +55,9 @@ func TestManualAndroidSetupKeepsInstalledHelperAndUSBConnection(t *testing.T) {
 	}
 	if d.ADBPort != "" {
 		t.Fatal("USB-only mode still advertises an ADB tunnel")
+	}
+	if d.AndroidIMEPort != "" {
+		t.Fatal("preserve-IME mode still advertises a remote keyboard")
 	}
 }
 

@@ -67,6 +67,7 @@ func main() {
 	providerCmd.Flags().Bool("use-ios-pair-cache", false, "Cache iOS pair records on disk to skip Trust dialog on reconnect (for unsupervised devices)")
 	providerCmd.Flags().Bool("android-manual-apk-install", false, "Use manually installed GADS Settings; do not install or uninstall Android helper APKs through ADB")
 	providerCmd.Flags().Bool("android-usb-only", false, "Keep Android debugging on USB; do not enable ADB TCP mode or the remote ADB tunnel")
+	providerCmd.Flags().Bool("android-preserve-ime", false, "Keep the phone's current input method; disable the GADS remote keyboard setup")
 	rootCmd.AddCommand(providerCmd)
 
 	// ADB Tunnel Command

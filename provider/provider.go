@@ -40,6 +40,7 @@ func StartProvider(flags *pflag.FlagSet, resourceFiles embed.FS) {
 	useIOSPairCache, _ := flags.GetBool("use-ios-pair-cache")
 	config.AndroidManualAPKInstall, _ = flags.GetBool("android-manual-apk-install")
 	config.AndroidUSBOnly, _ = flags.GetBool("android-usb-only")
+	config.AndroidPreserveIME, _ = flags.GetBool("android-preserve-ime")
 
 	if nickname == "" {
 		log.Fatalf("Please provide valid provider instance nickname via the --nickname flag, e.g. --nickname=Provider1")
