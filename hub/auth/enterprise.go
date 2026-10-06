@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,20 @@ func EnterpriseGate() gin.HandlerFunc {
 			return
 		}
 		_, signedIn := e.session(c)
+		nativeFrame := c.Request.Method == http.MethodGet && c.GetHeader("Sec-Fetch-Dest") == "iframe" && c.GetHeader("Upgrade") == "" && strings.Contains(c.GetHeader("Accept"), "text/html") && (path == "/" || allowedEnterpriseUIPath(path))
+		if nativeFrame {
+			if !signedIn {
+				c.Status(http.StatusUnauthorized)
+				c.Abort()
+				return
+			}
+			// Some SPA routes (e.g. /apps) share a path with a JSON API.
+			// Only a native HTML frame navigation gets the unchanged UI index;
+			// the browser keeps its original route and API requests are untouched.
+			c.Request.URL.Path = "/"
+			c.Request.URL.RawPath = ""
+			return
+		}
 		if path == "/" && (!signedIn || c.Query("native_login") != "1") {
 			// The enterprise cookie can outlive the native GADS inactivity session.
 			// A redirect to /devices here would loop after the UI discards its JWT.
@@ -146,6 +161,10 @@ func EnterpriseGate() gin.HandlerFunc {
 			return
 		}
 		if signedIn {
+			if c.Request.Method == http.MethodGet && c.GetHeader("Sec-Fetch-Dest") == "document" && c.GetHeader("Upgrade") == "" && allowedEnterpriseUIPath(path) {
+				c.Redirect(http.StatusFound, "/enterprise/app?path="+url.QueryEscape(path))
+				c.Abort()
+			}
 			return
 		}
 		// Static files carry no credentials. The SPA's private data endpoints remain gated.
@@ -167,7 +186,9 @@ func EnterpriseRoutes(r *gin.Engine) {
 	r.GET("/enterprise/login", enterpriseStart)
 	r.GET("/enterprise/callback", enterpriseCallback)
 	r.GET("/enterprise/complete", enterpriseComplete)
+	r.GET("/enterprise/app", enterpriseApp)
 	r.GET("/enterprise/ready", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		s, ok := Enterprise.session(c)
 		if !ok || !nativeSessionMatches(s.nativeSessionID, s.subject, time.Now()) {
 			c.Status(401)
@@ -175,6 +196,45 @@ func EnterpriseRoutes(r *gin.Engine) {
 		}
 		c.Status(204)
 	})
+}
+
+var enterpriseDeviceID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+// Only observed native UI routes may be opened by the enterprise wrapper. In
+// particular, the admin API prefix and arbitrary URL/query values are denied.
+func allowedEnterpriseUIPath(path string) bool {
+	switch path {
+	case "/devices", "/apps", "/credentials", "/actions", "/appium-grid", "/admin":
+		return true
+	}
+	const control = "/devices/control/"
+	return strings.HasPrefix(path, control) && enterpriseDeviceID.MatchString(strings.TrimPrefix(path, control))
+}
+
+// The official UI stays unchanged inside a same-origin frame. Its logout may
+// navigate only within that SPA, so this outer page observes the independently
+// bound native session and returns the top-level browser to enterprise login.
+func enterpriseApp(c *gin.Context) {
+	e := Enterprise
+	s, ok := e.session(c)
+	if !ok || !nativeSessionMatches(s.nativeSessionID, s.subject, time.Now()) {
+		c.Redirect(http.StatusFound, "/")
+		return
+	}
+	path := c.DefaultQuery("path", "/devices")
+	if !allowedEnterpriseUIPath(path) {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	nonce := randomOpaque()
+	c.Header("Cache-Control", "no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+	c.Header("Content-Security-Policy", fmt.Sprintf("default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline'; frame-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'", nonce))
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	t := template.Must(template.New("app").Parse(`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aibibu 设备中控</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden}iframe{display:block;width:100%;height:100%;border:0}</style><iframe title="Aibibu 设备中控" src="{{.Path}}" allow="autoplay; clipboard-read; clipboard-write; fullscreen"></iframe><script nonce="{{.Nonce}}">
+let checking=false;async function checkSession(){if(checking)return;checking=true;try{const r=await fetch('/enterprise/ready',{cache:'no-store'});if(r.status===401||r.status===403){location.replace('/');}}catch(e){}finally{checking=false;}}checkSession();setInterval(checkSession,1000);
+</script></html>`))
+	_ = t.Execute(c.Writer, map[string]string{"Nonce": nonce, "Path": path})
 }
 func staffPage(c *gin.Context, title, message, href string) {
 	c.Header("Cache-Control", "no-store")
@@ -408,7 +468,7 @@ func enterpriseComplete(c *gin.Context) {
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	t := template.Must(template.New("complete").Parse(`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aibibu 设备中控</title><style>body{font:16px system-ui;padding:32px}iframe{width:100%;height:75vh;border:0}</style><p id="status">企业账号已验证，正在进入设备中控…</p><iframe id="native" title="设备中控登录" src="/?native_login=1"></iframe><script nonce="{{.Nonce}}">
 const ticket={{.Ticket}};let submitted=false;const frame=document.getElementById('native');const started=Date.now();
-const timer=setInterval(async()=>{try{const d=frame.contentDocument;if(!d)return;const pass=d.querySelector('input[type="password"]');const user=d.querySelector('input[placeholder="your.username"]')||d.querySelector('input[type="text"]');const button=[...d.querySelectorAll('button')].find(b=>b.textContent.trim().toLowerCase()==='log in');if(!submitted&&user&&pass&&button){const set=Object.getOwnPropertyDescriptor(frame.contentWindow.HTMLInputElement.prototype,'value').set;set.call(user,'aibibu-oidc-ticket');user.dispatchEvent(new frame.contentWindow.Event('input',{bubbles:true}));set.call(pass,ticket);pass.dispatchEvent(new frame.contentWindow.Event('input',{bubbles:true}));submitted=true;button.click();}if(frame.contentWindow.location.pathname==='/devices'){const r=await fetch('/enterprise/ready');if(r.ok){clearInterval(timer);location.replace('/devices');}}if(Date.now()-started>30000){clearInterval(timer);document.getElementById('status').textContent='进入中控失败，请重新企业登录。';}}catch(e){clearInterval(timer);document.getElementById('status').textContent='进入中控失败，请重新企业登录。';}},250);
+const timer=setInterval(async()=>{try{const d=frame.contentDocument;if(!d)return;const pass=d.querySelector('input[type="password"]');const user=d.querySelector('input[placeholder="your.username"]')||d.querySelector('input[type="text"]');const button=[...d.querySelectorAll('button')].find(b=>b.textContent.trim().toLowerCase()==='log in');if(!submitted&&user&&pass&&button){const set=Object.getOwnPropertyDescriptor(frame.contentWindow.HTMLInputElement.prototype,'value').set;set.call(user,'aibibu-oidc-ticket');user.dispatchEvent(new frame.contentWindow.Event('input',{bubbles:true}));set.call(pass,ticket);pass.dispatchEvent(new frame.contentWindow.Event('input',{bubbles:true}));submitted=true;button.click();}if(frame.contentWindow.location.pathname==='/devices'){const r=await fetch('/enterprise/ready');if(r.ok){clearInterval(timer);location.replace('/enterprise/app');}}if(Date.now()-started>30000){clearInterval(timer);document.getElementById('status').textContent='进入中控失败，请重新企业登录。';}}catch(e){clearInterval(timer);document.getElementById('status').textContent='进入中控失败，请重新企业登录。';}},250);
 </script></html>`))
 	_ = t.Execute(c.Writer, map[string]string{"Nonce": nonce, "Ticket": s.ticket})
 }

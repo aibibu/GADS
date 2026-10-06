@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -342,5 +343,167 @@ func TestEnterpriseGateAndNativePasswordDisabled(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || w.Header().Get("Location") != "" {
 		t.Fatal("native session expiry redirects in a loop")
+	}
+}
+
+func TestEnterpriseUIPathAllowlist(t *testing.T) {
+	for _, path := range []string{"/devices", "/apps", "/credentials", "/actions", "/appium-grid", "/admin", "/devices/control/971336be0806", "/devices/control/1234-abcd_AB"} {
+		if !allowedEnterpriseUIPath(path) {
+			t.Fatal("known native UI path rejected:", path)
+		}
+	}
+	for _, path := range []string{"", "/", "//outside.example", "https://outside.example", "/devices?next=https://outside.example", "/devices#outside", "/devices\\outside", "/admin/users", "/device/phone/stream", "/devices/control/", "/devices/control/../admin", "/devices/control/%2foutside", "/devices/control/phone?token=x", "/devices/control/phone#x", "/devices/control/phone\\x", "/devices/control/phone/x", "/devices/control/" + strings.Repeat("x", 129)} {
+		if allowedEnterpriseUIPath(path) {
+			t.Fatal("non-UI or unsafe wrapper path accepted:", path)
+		}
+	}
+}
+
+func TestEnterpriseAppRequiresLiveNativeSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, state := range []string{"valid", "anonymous", "logout", "idle-expired", "absolute-expired", "enterprise-expired"} {
+		t.Run(state, func(t *testing.T) {
+			withEnterpriseNativeAuth(t)
+			previous := Enterprise
+			e := testEnterprise()
+			Enterprise = e
+			t.Cleanup(func() { Enterprise = previous })
+			e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: time.Now().Add(time.Hour)}
+			id := recordEnterpriseLogin(t, e, "browser", "owner-sub")
+			switch state {
+			case "logout":
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/logout", nil)
+				c.Request.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+				EnterpriseLogout(c)
+				DeleteSession(id)
+			case "idle-expired":
+				ageSession(t, id, 2*time.Hour, time.Hour+time.Minute)
+			case "absolute-expired":
+				ageSession(t, id, 9*time.Hour, time.Minute)
+			case "enterprise-expired":
+				s := e.sessions[opaqueHash("browser")]
+				s.expires = time.Now().Add(-time.Second)
+				e.sessions[opaqueHash("browser")] = s
+			}
+			r := gin.New()
+			r.Use(EnterpriseGate())
+			EnterpriseRoutes(r)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/enterprise/app", nil)
+			if state != "anonymous" {
+				req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+			}
+			r.ServeHTTP(w, req)
+			if state == "valid" {
+				if w.Code != 200 || !strings.Contains(w.Body.String(), `src="/devices"`) || !strings.Contains(w.Body.String(), "fetch('/enterprise/ready',{cache:'no-store'})") || !strings.Contains(w.Body.String(), "location.replace('/')") || w.Header().Get("Cache-Control") != "no-store" {
+					t.Fatal("valid enterprise wrapper is missing native UI or logout/expiry observation")
+				}
+			} else if w.Code != 302 || w.Header().Get("Location") != "/" {
+				t.Fatal("unavailable session must return to the enterprise login entry")
+			}
+		})
+	}
+}
+
+func TestEnterpriseAppRejectsUnsafePaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	withEnterpriseNativeAuth(t)
+	previous := Enterprise
+	e := testEnterprise()
+	Enterprise = e
+	t.Cleanup(func() { Enterprise = previous })
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: time.Now().Add(time.Hour)}
+	recordEnterpriseLogin(t, e, "browser", "owner-sub")
+	r := gin.New()
+	EnterpriseRoutes(r)
+	for _, path := range []string{"//outside.example", "https://outside.example", "/devices?redirect=https://outside.example", "/devices\\outside", "/admin/users"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/enterprise/app?path="+url.QueryEscape(path), nil)
+		req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+		r.ServeHTTP(w, req)
+		if w.Code != 400 || w.Header().Get("Location") != "" {
+			t.Fatal("unsafe app path caused a navigation:", path)
+		}
+	}
+}
+
+func TestEnterpriseGateWrapsOnlyTopLevelKnownUIAndServesNativeFrames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := Enterprise
+	e := testEnterprise()
+	Enterprise = e
+	t.Cleanup(func() { Enterprise = previous })
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: time.Now().Add(time.Hour)}
+	r := gin.New()
+	r.Use(EnterpriseGate())
+	// This models the existing official-UI serving middleware after the gate.
+	// Root HTML is served before the JSON API handler for that same route.
+	r.Use(func(c *gin.Context) {
+		if c.Request.URL.Path == "/" {
+			c.String(200, "native-index")
+			c.Abort()
+		}
+	})
+	for _, path := range []string{"/devices", "/devices/control/phone", "/apps", "/admin/users", "/device/phone/stream"} {
+		r.GET(path, func(c *gin.Context) { c.String(200, "original:"+c.Request.URL.Path) })
+	}
+	r.POST("/apps", func(c *gin.Context) { c.String(200, "original:/apps") })
+	r.POST("/provider-update", func(c *gin.Context) { c.String(200, "original:/provider-update") })
+	for _, tc := range []struct {
+		method, path, dest, accept, upgrade string
+		anonymous                           bool
+		code                                int
+		body, location                      string
+	}{
+		{method: "GET", path: "/devices", dest: "document", accept: "text/html", code: 302, location: "/enterprise/app?path=" + url.QueryEscape("/devices")},
+		{method: "GET", path: "/devices/control/phone", dest: "document", accept: "text/html", code: 302, location: "/enterprise/app?path=" + url.QueryEscape("/devices/control/phone")},
+		{method: "GET", path: "/apps", dest: "document", accept: "text/html", code: 302, location: "/enterprise/app?path=" + url.QueryEscape("/apps")},
+		{method: "GET", path: "/apps", dest: "iframe", accept: "text/html", code: 200, body: "native-index"},
+		{method: "GET", path: "/devices", dest: "iframe", accept: "text/html", code: 200, body: "native-index"},
+		{method: "GET", path: "/", dest: "iframe", accept: "text/html", code: 200, body: "native-index"},
+		{method: "GET", path: "/apps", accept: "application/json", code: 200, body: "original:/apps"},
+		{method: "GET", path: "/apps", dest: "iframe", accept: "application/json", code: 200, body: "original:/apps"},
+		{method: "GET", path: "/devices", accept: "text/html", code: 200, body: "original:/devices"},
+		{method: "POST", path: "/apps", dest: "document", accept: "text/html", code: 200, body: "original:/apps"},
+		{method: "GET", path: "/admin/users", dest: "document", accept: "text/html", code: 200, body: "original:/admin/users"},
+		{method: "GET", path: "/admin/users", dest: "iframe", accept: "text/html", code: 200, body: "original:/admin/users"},
+		{method: "GET", path: "/device/phone/stream", dest: "document", upgrade: "websocket", code: 200, body: "original:/device/phone/stream"},
+		{method: "POST", path: "/provider-update", dest: "document", anonymous: true, code: 200, body: "original:/provider-update"},
+		{method: "GET", path: "/apps", dest: "iframe", accept: "text/html", anonymous: true, code: 401},
+		{method: "GET", path: "/", dest: "iframe", accept: "text/html", anonymous: true, code: 401},
+	} {
+		t.Run(tc.method+tc.path+tc.dest+tc.accept+tc.upgrade, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Sec-Fetch-Dest", tc.dest)
+			req.Header.Set("Accept", tc.accept)
+			req.Header.Set("Upgrade", tc.upgrade)
+			if !tc.anonymous {
+				req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+			}
+			r.ServeHTTP(w, req)
+			if w.Code != tc.code || w.Header().Get("Location") != tc.location || tc.body != "" && w.Body.String() != tc.body {
+				t.Fatalf("unexpected route result: status=%d location=%q body=%q", w.Code, w.Header().Get("Location"), w.Body.String())
+			}
+		})
+	}
+}
+
+func TestEnterpriseCompleteEntersObservedWrapper(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := Enterprise
+	e := testEnterprise()
+	Enterprise = e
+	t.Cleanup(func() { Enterprise = previous })
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", ticket: "fallback-ticket", expires: time.Now().Add(time.Hour), ticketExpires: time.Now().Add(time.Minute)}
+	r := gin.New()
+	EnterpriseRoutes(r)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/enterprise/complete", nil)
+	req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: "browser"})
+	r.ServeHTTP(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "location.replace('/enterprise/app')") {
+		t.Fatal("successful native login bridge does not enter the enterprise wrapper")
 	}
 }
