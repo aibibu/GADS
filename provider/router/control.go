@@ -321,7 +321,11 @@ func iOSAppSwitcher(dev devices.PlatformDevice) (*http.Response, error) {
 func androidRecents(dev devices.PlatformDevice) error {
 	if dev.GetOS() == "android" {
 		cmd := exec.CommandContext(dev.GetContext(), "adb", "-s", dev.GetSerial(), "shell", "input", "keyevent", "KEYCODE_APP_SWITCH")
-		return cmd.Run()
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("Android recent-apps navigation failed: %w: %s", err, bytes.TrimSpace(output))
+		}
+		return nil
 	}
 	return fmt.Errorf("Device is not an Android device")
 }
