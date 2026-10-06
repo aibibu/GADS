@@ -21,6 +21,7 @@ import (
 	"GADS/common/models"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/oauth2"
 )
 
@@ -33,8 +34,8 @@ type loginFlow struct {
 	expires                  time.Time
 }
 type enterpriseSession struct {
-	subject, ticket        string
-	expires, ticketExpires time.Time
+	subject, ticket, nativeSessionID string
+	expires, ticketExpires           time.Time
 }
 type enterpriseLogin struct {
 	origin, ownerSubject, group string
@@ -168,7 +169,7 @@ func EnterpriseRoutes(r *gin.Engine) {
 	r.GET("/enterprise/complete", enterpriseComplete)
 	r.GET("/enterprise/ready", func(c *gin.Context) {
 		s, ok := Enterprise.session(c)
-		if !ok || s.ticket != "" {
+		if !ok || !nativeSessionMatches(s.nativeSessionID, s.subject, time.Now()) {
 			c.Status(401)
 			return
 		}
@@ -266,21 +267,99 @@ func enterpriseCallback(c *gin.Context) {
 		return
 	}
 	// Stable issuer/subject mapping; emails never grant a role or link an account.
-	username := "staff:" + id.Subject
-	if err := db.GlobalMongoStore.AddOrUpdateUser(models.User{Username: username, Role: "admin"}); err != nil {
+	if err := ensureEnterpriseUser(db.GlobalMongoStore, id.Subject); err != nil {
 		c.Status(503)
 		return
 	}
-	session, ticket := randomOpaque(), randomOpaque()
-	e.mu.Lock()
-	e.sweepLocked(time.Now())
-	e.sessions[opaqueHash(session)] = enterpriseSession{id.Subject, ticket, time.Now().Add(8 * time.Hour), time.Now().Add(time.Minute)}
-	e.mu.Unlock()
+	previousCookie, _ := c.Cookie(enterpriseCookie)
+	session := e.issueSession(id.Subject, previousCookie, time.Now())
 	setPrivateCookie(c, enterpriseCookie, session, 8*3600)
 	c.Header("Cache-Control", "no-store")
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Redirect(303, "/enterprise/complete")
 }
+
+type enterpriseUserStore interface {
+	GetUser(string) (models.User, error)
+	AddOrUpdateUser(models.User) error
+}
+
+// Repeated OIDC login does not replace an existing user's ID, workspace
+// assignments, or other fields. A failed lookup must not become an upsert.
+func ensureEnterpriseUser(store enterpriseUserStore, subject string) error {
+	username := "staff:" + subject
+	user, err := store.GetUser(username)
+	if err == nil {
+		if user.Username != username || user.Role != "admin" {
+			return errors.New("existing enterprise user identity or role differs")
+		}
+		return nil
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return err
+	}
+	return store.AddOrUpdateUser(models.User{Username: username, Role: "admin"})
+}
+
+// Readiness must not keep a native login alive merely by polling it. Check the
+// existing session under its own lock without sliding its inactivity window.
+func nativeSessionMatches(id, subject string, now time.Time) bool {
+	if id == "" || subject == "" {
+		return false
+	}
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	s, ok := sessions[id]
+	if !ok {
+		return false
+	}
+	if sessionExpired(s, now) {
+		delete(sessions, id)
+		return false
+	}
+	return s.ClientID == "" && s.Username == "staff:"+subject
+}
+
+// Called only after the callback has verified the new ID token and access
+// group. A new browser cookie and fallback ticket are issued on every login;
+// only a live native session for the same verified subject can be inherited.
+func (e *enterpriseLogin) issueSession(subject, previousCookie string, now time.Time) string {
+	cookie, ticket := randomOpaque(), randomOpaque()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sweepLocked(now)
+	s := enterpriseSession{subject: subject, ticket: ticket, expires: now.Add(8 * time.Hour), ticketExpires: now.Add(time.Minute)}
+	previousKey := opaqueHash(previousCookie)
+	if previous, ok := e.sessions[previousKey]; ok {
+		if previous.subject == subject && nativeSessionMatches(previous.nativeSessionID, subject, now) {
+			s.nativeSessionID = previous.nativeSessionID
+		}
+		delete(e.sessions, previousKey)
+	}
+	e.sessions[opaqueHash(cookie)] = s
+	return cookie
+}
+
+// Bind only the server's successfully generated and signature-verified token.
+// The official UI remains responsible for its token storage and login form.
+func (e *enterpriseLogin) recordNativeToken(cookie, token string, now time.Time) error {
+	claims, err := ValidateJWT(token, e.origin)
+	if err != nil || claims.Issuer != TokenIssuer || claims.Origin != e.origin {
+		return errors.New("invalid native login token")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sweepLocked(now)
+	key := opaqueHash(cookie)
+	s, ok := e.sessions[key]
+	if !ok || s.ticket != "" || claims.Subject != "staff:"+s.subject || claims.Username != claims.Subject || !nativeSessionMatches(claims.SessionID, s.subject, now) {
+		return errors.New("native login does not match enterprise session")
+	}
+	s.nativeSessionID = claims.SessionID
+	e.sessions[key] = s
+	return nil
+}
+
 func (e *enterpriseLogin) consumeTicket(cookie, ticket string, now time.Time) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

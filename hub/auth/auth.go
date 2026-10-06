@@ -162,6 +162,13 @@ func LoginHandler(c *gin.Context) {
 		api.InternalError(c, "Failed to generate token")
 		return
 	}
+	if Enterprise != nil {
+		cookie, _ := c.Cookie(enterpriseCookie)
+		if err := Enterprise.recordNativeToken(cookie, token, time.Now()); err != nil {
+			api.InternalError(c, "Failed to bind enterprise login")
+			return
+		}
+	}
 
 	// Response in requested format
 	api.OK(c, "", models.AuthResponse{

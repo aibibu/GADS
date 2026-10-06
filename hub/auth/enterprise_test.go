@@ -1,16 +1,255 @@
 package auth
 
 import (
-	"github.com/gin-gonic/gin"
+	"GADS/common/models"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 func testEnterprise() *enterpriseLogin {
 	return &enterpriseLogin{origin: "https://devices.example.com", ownerSubject: "owner-sub", group: "devices-owner", flows: map[string]loginFlow{}, sessions: map[string]enterpriseSession{}}
+}
+
+type enterpriseUsersStub struct {
+	user     models.User
+	readErr  error
+	writeErr error
+	written  []models.User
+}
+
+func (s *enterpriseUsersStub) GetUser(_ string) (models.User, error) {
+	return s.user, s.readErr
+}
+func (s *enterpriseUsersStub) AddOrUpdateUser(user models.User) error {
+	s.written = append(s.written, user)
+	return s.writeErr
+}
+
+func TestEnterpriseUserRepeatedLoginPreservesAssignedFields(t *testing.T) {
+	store := &enterpriseUsersStub{user: models.User{Username: "staff:owner-sub", Role: "admin", ID: "existing-id", WorkspaceIDs: []string{"assigned-workspace"}}}
+	if err := ensureEnterpriseUser(store, "owner-sub"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.written) != 0 || store.user.ID != "existing-id" || len(store.user.WorkspaceIDs) != 1 || store.user.WorkspaceIDs[0] != "assigned-workspace" {
+		t.Fatal("repeated enterprise login rewrites existing user fields")
+	}
+}
+
+func TestEnterpriseUserCreationOnlyAfterConfirmedMissingUser(t *testing.T) {
+	store := &enterpriseUsersStub{readErr: mongo.ErrNoDocuments}
+	if err := ensureEnterpriseUser(store, "owner-sub"); err != nil || len(store.written) != 1 {
+		t.Fatal("confirmed missing enterprise user was not created")
+	}
+	u := store.written[0]
+	if u.Username != "staff:owner-sub" || u.Role != "admin" || u.Password != "" || u.ID != "" || len(u.WorkspaceIDs) != 0 {
+		t.Fatal("new enterprise user inherited unrelated fields or credentials")
+	}
+	readErr := errors.New("database unavailable")
+	store = &enterpriseUsersStub{readErr: readErr}
+	if !errors.Is(ensureEnterpriseUser(store, "owner-sub"), readErr) || len(store.written) != 0 {
+		t.Fatal("failed database lookup must not overwrite or create a user")
+	}
+	writeErr := errors.New("write unavailable")
+	store = &enterpriseUsersStub{readErr: mongo.ErrNoDocuments, writeErr: writeErr}
+	if !errors.Is(ensureEnterpriseUser(store, "owner-sub"), writeErr) {
+		t.Fatal("failed user creation was ignored")
+	}
+	for _, user := range []models.User{{Username: "staff:other-sub", Role: "admin"}, {Username: "staff:owner-sub", Role: "user"}} {
+		store = &enterpriseUsersStub{user: user}
+		if ensureEnterpriseUser(store, "owner-sub") == nil || len(store.written) != 0 {
+			t.Fatal("existing user identity or role conflict must fail without a rewrite")
+		}
+	}
+}
+
+func withEnterpriseNativeAuth(t *testing.T) {
+	t.Helper()
+	withEmptySessions(t)
+	withTestLifetimes(t, time.Hour, 8*time.Hour)
+	previousCache := secretCache
+	secretCache = setupTestSecretCache()
+	t.Cleanup(func() { secretCache = previousCache })
+}
+
+func recordEnterpriseLogin(t *testing.T, e *enterpriseLogin, cookie, subject string) string {
+	t.Helper()
+	token, err := GenerateJWT("staff:"+subject, "admin", "tenant", []string{"user", "admin"}, e.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.recordNativeToken(cookie, token, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := ValidateJWT(token, e.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claims.SessionID
+}
+
+func TestEnterpriseNativeTokenMustMatchBoundBrowserAndSubject(t *testing.T) {
+	withEnterpriseNativeAuth(t)
+	e := testEnterprise()
+	now := time.Now()
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: now.Add(time.Hour)}
+	token, err := GenerateJWT("staff:owner-sub", "admin", "tenant", []string{"admin"}, e.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.recordNativeToken("foreign-browser", token, now) == nil {
+		t.Fatal("foreign browser accepted")
+	}
+	if e.recordNativeToken("browser", token+"tampered", now) == nil {
+		t.Fatal("invalid token signature accepted")
+	}
+	other, err := GenerateJWT("staff:other-sub", "admin", "tenant", []string{"admin"}, e.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.recordNativeToken("browser", other, now) == nil {
+		t.Fatal("different subject accepted")
+	}
+	machine, err := GenerateClientCredentialsJWT("machine", "staff:owner-sub", "admin", "tenant", []string{"admin"}, e.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.recordNativeToken("browser", machine, now) == nil {
+		t.Fatal("machine session accepted as a native user login")
+	}
+	if err := e.recordNativeToken("browser", token, now); err != nil {
+		t.Fatal("valid native login rejected:", err)
+	}
+	if !nativeSessionMatches(e.sessions[opaqueHash("browser")].nativeSessionID, "owner-sub", now) {
+		t.Fatal("native session was not bound")
+	}
+}
+
+func TestEnterpriseRepeatLoginKeepsLiveSessionAndFallbackTicket(t *testing.T) {
+	withEnterpriseNativeAuth(t)
+	e := testEnterprise()
+	now := time.Now()
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: now.Add(time.Hour)}
+	nativeID := recordEnterpriseLogin(t, e, "browser", "owner-sub")
+	newCookie := e.issueSession("owner-sub", "browser", now)
+	s := e.sessions[opaqueHash(newCookie)]
+	if s.nativeSessionID != nativeID || s.ticket == "" {
+		t.Fatal("repeat login must retain its live native session and a fresh fallback ticket")
+	}
+	if _, ok := e.sessions[opaqueHash("browser")]; ok {
+		t.Fatal("old browser cookie was not rotated")
+	}
+	if _, ok := e.consumeTicket("foreign-browser", s.ticket, now); ok {
+		t.Fatal("fallback ticket accepted from another browser")
+	}
+	if _, ok := e.consumeTicket(newCookie, s.ticket, now); !ok {
+		t.Fatal("fallback ticket must work if the UI lost its cached native token")
+	}
+	if _, ok := e.consumeTicket(newCookie, s.ticket, now); ok {
+		t.Fatal("fallback ticket replay accepted")
+	}
+	replacementID := recordEnterpriseLogin(t, e, newCookie, "owner-sub")
+	if replacementID == nativeID || e.sessions[opaqueHash(newCookie)].nativeSessionID != replacementID {
+		t.Fatal("fallback login did not replace the recorded native session")
+	}
+}
+
+func TestEnterpriseRepeatLoginRejectsUnavailableNativeSessions(t *testing.T) {
+	for _, tc := range []string{"logout", "idle-expired", "absolute-expired", "different-subject", "different-native-user", "foreign-cookie", "enterprise-expired"} {
+		t.Run(tc, func(t *testing.T) {
+			withEnterpriseNativeAuth(t)
+			e := testEnterprise()
+			now := time.Now()
+			e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: now.Add(time.Hour)}
+			id := recordEnterpriseLogin(t, e, "browser", "owner-sub")
+			subject, cookie := "owner-sub", "browser"
+			switch tc {
+			case "logout":
+				DeleteSession(id)
+			case "idle-expired":
+				ageSession(t, id, 2*time.Hour, time.Hour+time.Minute)
+			case "absolute-expired":
+				ageSession(t, id, 9*time.Hour, time.Minute)
+			case "different-subject":
+				subject = "other-sub"
+			case "different-native-user":
+				sessionsMu.Lock()
+				sessions[id].Username = "staff:other-sub"
+				sessionsMu.Unlock()
+			case "foreign-cookie":
+				cookie = "foreign-browser"
+			case "enterprise-expired":
+				s := e.sessions[opaqueHash(cookie)]
+				s.expires = now
+				e.sessions[opaqueHash(cookie)] = s
+			}
+			newCookie := e.issueSession(subject, cookie, time.Now())
+			s := e.sessions[opaqueHash(newCookie)]
+			if s.nativeSessionID != "" || s.ticket == "" {
+				t.Fatal("unavailable or mismatched session reused, or fresh login ticket missing")
+			}
+		})
+	}
+}
+
+func TestEnterpriseReadyRequiresLiveSameIdentitySessionWithoutTouch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	withEnterpriseNativeAuth(t)
+	previous := Enterprise
+	e := testEnterprise()
+	Enterprise = e
+	t.Cleanup(func() { Enterprise = previous })
+	now := time.Now()
+	e.sessions[opaqueHash("browser")] = enterpriseSession{subject: "owner-sub", expires: now.Add(time.Hour)}
+	r := gin.New()
+	EnterpriseRoutes(r)
+	ready := func(cookie string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/enterprise/ready", nil)
+		req.AddCookie(&http.Cookie{Name: enterpriseCookie, Value: cookie})
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if ready("browser") != 401 {
+		t.Fatal("consumed ticket alone is insufficient before native JWT creation succeeds")
+	}
+	id := recordEnterpriseLogin(t, e, "browser", "owner-sub")
+	newCookie := e.issueSession("owner-sub", "browser", time.Now())
+	if e.sessions[opaqueHash(newCookie)].ticket == "" || ready(newCookie) != 204 {
+		t.Fatal("repeat SSO login with a live native session should be ready without another form submission")
+	}
+	sessionsMu.Lock()
+	lastUsed := sessions[id].LastUsed
+	sessionsMu.Unlock()
+	if ready(newCookie) != 204 || ready("foreign-browser") != 401 {
+		t.Fatal("incorrect ready result for a valid or foreign browser")
+	}
+	sessionsMu.Lock()
+	unchanged := sessions[id].LastUsed.Equal(lastUsed)
+	sessionsMu.Unlock()
+	if !unchanged {
+		t.Fatal("readiness polling extends the native inactivity timeout")
+	}
+	ageSession(t, id, 2*time.Hour, time.Hour+time.Minute)
+	if ready(newCookie) != 401 {
+		t.Fatal("idle-expired native session remains ready")
+	}
+	// A new fallback login restores readiness, but logout revokes it immediately.
+	s := e.sessions[opaqueHash(newCookie)]
+	if _, ok := e.consumeTicket(newCookie, s.ticket, time.Now()); !ok {
+		t.Fatal("fresh fallback login ticket failed")
+	}
+	id = recordEnterpriseLogin(t, e, newCookie, "owner-sub")
+	DeleteSession(id)
+	if ready(newCookie) != 401 {
+		t.Fatal("logged-out native session remains ready")
+	}
 }
 func TestEnterpriseFlowBrowserBindingAndReplay(t *testing.T) {
 	e := testEnterprise()
