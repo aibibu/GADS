@@ -40,6 +40,21 @@ You can skip this step, and the provider will create a folder named after the pr
 
 To specify a folder, create it on your machine and provide it at startup using the `--provider-folder` flag.
 
+## Manual Android APK Installation
+
+If the phone does not permit APK installation through USB, install the bundled
+`gads-settings.apk` on the phone using its file manager, then start the provider
+with `--android-manual-apk-install`. This mode checks for `com.gads.settings`
+and preserves manually installed helper packages. It never falls back to ADB
+installation when the helper is missing. Keep the device disabled until the
+manual installation is complete.
+
+For a USB-connected phone, `--android-usb-only` also skips enabling ADB TCP mode
+and forwarding the remote ADB tunnel. GADS screen and control connections still
+use USB port forwarding. Both options default to false, so existing providers
+retain their setup behavior. Android permissions and manufacturer restrictions
+still apply; these flags do not grant permissions.
+
 ## Provider Setup
 
 ### macOS

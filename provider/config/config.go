@@ -19,6 +19,10 @@ import (
 
 var ProviderConfig = &models.Provider{}
 
+// Process-local options preserve the defaults of other providers.
+var AndroidManualAPKInstall bool
+var AndroidUSBOnly bool
+
 func SetupConfig(nickname, folder, hubAddress string) {
 	provider, err := db.GlobalMongoStore.GetProvider(nickname)
 	if err != nil {

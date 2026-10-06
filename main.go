@@ -65,6 +65,8 @@ func main() {
 	providerCmd.Flags().String("hub", "", "The address of the GADS hub instance")
 	providerCmd.Flags().String("turn-username-suffix", "gads", "Suffix to append to TURN usernames (format: timestamp:suffix)")
 	providerCmd.Flags().Bool("use-ios-pair-cache", false, "Cache iOS pair records on disk to skip Trust dialog on reconnect (for unsupervised devices)")
+	providerCmd.Flags().Bool("android-manual-apk-install", false, "Use manually installed GADS Settings; do not install or uninstall Android helper APKs through ADB")
+	providerCmd.Flags().Bool("android-usb-only", false, "Keep Android debugging on USB; do not enable ADB TCP mode or the remote ADB tunnel")
 	rootCmd.AddCommand(providerCmd)
 
 	// ADB Tunnel Command

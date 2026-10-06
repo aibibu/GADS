@@ -38,6 +38,8 @@ func StartProvider(flags *pflag.FlagSet, resourceFiles embed.FS) {
 	hubAddress, _ := flags.GetString("hub")
 	turnUsernameSuffix, _ := flags.GetString("turn-username-suffix")
 	useIOSPairCache, _ := flags.GetBool("use-ios-pair-cache")
+	config.AndroidManualAPKInstall, _ = flags.GetBool("android-manual-apk-install")
+	config.AndroidUSBOnly, _ = flags.GetBool("android-usb-only")
 
 	if nickname == "" {
 		log.Fatalf("Please provide valid provider instance nickname via the --nickname flag, e.g. --nickname=Provider1")

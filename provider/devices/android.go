@@ -185,6 +185,9 @@ func (d *AndroidDevice) allocatePorts() error {
 }
 
 func (d *AndroidDevice) cleanupOldApps() error {
+	if config.AndroidManualAPKInstall {
+		return nil
+	}
 	d.InstalledApps = d.GetInstalledAppBundleIDs()
 	logger.ProviderLogger.LogDebugf("android_device_setup", "Updated installed apps for Android device `%v`", d.GetUDID())
 
@@ -370,6 +373,14 @@ func (d *AndroidDevice) stopStreamService() {
 }
 
 func (d *AndroidDevice) installGadsSettingsApp() error {
+	if config.AndroidManualAPKInstall {
+		cmd := exec.CommandContext(d.Context, "adb", "-s", d.GetSerial(), "shell", "pm", "path", "com.gads.settings")
+		output, err := cmd.Output()
+		if err != nil || !strings.HasPrefix(strings.TrimSpace(string(output)), "package:") {
+			return fmt.Errorf("GADS Settings must be installed manually on the phone before enabling this device; ADB installation is disabled")
+		}
+		return nil
+	}
 	logger.ProviderLogger.LogInfof("android_device_setup", "Installing GADS Settings apk on device `%v`", d.GetUDID())
 	cmd := exec.CommandContext(d.Context, "adb", "-s", d.GetSerial(), "install", "-r", fmt.Sprintf("%s/gads-settings.apk", config.ProviderConfig.ProviderFolder))
 	if err := cmd.Run(); err != nil {
@@ -607,6 +618,10 @@ func (d *AndroidDevice) disableKeyguard() {
 }
 
 func (d *AndroidDevice) enableADBTCPMode() error {
+	if config.AndroidUSBOnly {
+		d.ADBPort = ""
+		return nil
+	}
 	// Check if tcpip mode is already enabled to avoid restarting adbd unnecessarily
 	checkCmd := exec.CommandContext(d.Context, "adb", "-s", d.GetSerial(), "shell", "getprop", "service.adb.tcp.port")
 	var outBuffer bytes.Buffer
@@ -629,6 +644,9 @@ func (d *AndroidDevice) enableADBTCPMode() error {
 }
 
 func (d *AndroidDevice) forwardADB() error {
+	if config.AndroidUSBOnly {
+		return nil
+	}
 	return d.forwardPort(adbTCPPort, d.ADBPort)
 }
 
