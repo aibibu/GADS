@@ -39,6 +39,10 @@ import (
 )
 
 func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFiles embed.FS) {
+	if err := auth.ConfigureEnterprise(); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
 	port, _ := flags.GetString("port")
 	if port == "" {
 		slog.Error("Please provide a port on which the hub instance should run through the --port flag, e.g. --port=10000")
@@ -52,6 +56,10 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	fmt.Printf("Using MongoDB instance on %s. You can change the instance with the --mongo-db flag\n", mongoDB)
 
 	authEnabled, _ := flags.GetBool("auth")
+	if auth.Enterprise != nil && !authEnabled {
+		slog.Error("Enterprise login requires --auth=true")
+		os.Exit(1)
+	}
 	fmt.Printf("Auth enabled: %v. You can enable/disable authentication on hub endpoints with the --auth flag\n", authEnabled)
 
 	// Every request slides a session forward, so the TTL acts as an inactivity
@@ -72,8 +80,12 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	turnUsernameSuffix, _ := flags.GetString("turn-username-suffix")
 	fmt.Printf("TURN username suffix: %s. You can change it with the --turn-username-suffix flag\n", turnUsernameSuffix)
 
-	fmt.Println("Default admin username is `admin`")
-	fmt.Println("Default admin password is `password` unless you've changed it")
+	if auth.Enterprise == nil {
+		fmt.Println("Default admin username is `admin`")
+		fmt.Println("Default admin password is `password` unless you've changed it")
+	} else {
+		fmt.Println("Aibibu enterprise login enabled; native passwords are disabled")
+	}
 
 	filesDir, _ := flags.GetString("files-dir")
 	osTempDir := os.TempDir()

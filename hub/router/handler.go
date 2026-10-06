@@ -28,7 +28,11 @@ import (
 func HandleRequests(uiFiles fs.FS) *gin.Engine {
 	// Create the router and allow all origins
 	// Allow particular headers as well
-	r := gin.Default()
+	// OIDC callbacks and websocket URLs may contain credentials: never log URLs.
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(auth.EnterpriseGate())
+	auth.EnterpriseRoutes(r)
 
 	// Add Swagger route
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))

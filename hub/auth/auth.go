@@ -123,12 +123,17 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	user, err := db.GlobalMongoStore.GetUser(creds.Username)
+	var user models.User
+	if Enterprise != nil {
+		user, err = EnterpriseCredentials(c, creds)
+	} else {
+		user, err = db.GlobalMongoStore.GetUser(creds.Username)
+	}
 	if err != nil {
 		api.Unauthorized(c, "Invalid credentials")
 		return
 	}
-	if user.Password != creds.Password {
+	if Enterprise == nil && (user.Password == "" || strings.HasPrefix(user.Username, "staff:") || user.Password != creds.Password) {
 		api.Unauthorized(c, "Invalid credentials")
 		return
 	}
@@ -179,6 +184,7 @@ func LoginHandler(c *gin.Context) {
 // @Security     BearerAuth
 // @Router       /logout [post]
 func LogoutHandler(c *gin.Context) {
+	EnterpriseLogout(c)
 	// Check if there's a bearer token
 	authHeader := c.GetHeader("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
@@ -211,6 +217,10 @@ func LogoutHandler(c *gin.Context) {
 // @Security     BearerAuth
 // @Router       /change-password [post]
 func ChangePasswordHandler(c *gin.Context) {
+	if Enterprise != nil {
+		api.BadRequest(c, "Manage passwords in Aibibu enterprise identity")
+		return
+	}
 	// Always resolve the acting user from the token/context - never from the
 	// request body - so a user can only ever change their own password.
 	username := c.GetString("username")
