@@ -346,6 +346,71 @@ func TestEnterpriseGateAndNativePasswordDisabled(t *testing.T) {
 	}
 }
 
+func TestEnterpriseGateAllowsOnlyRegisteredNativeAutomationRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := Enterprise
+	Enterprise = testEnterprise()
+	t.Cleanup(func() { Enterprise = previous })
+	r := gin.New()
+	r.RedirectTrailingSlash = false
+	r.Use(EnterpriseGate())
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	r.GET("/grid/status", accepted)
+	r.POST("/grid/session", accepted)
+	r.POST("/oauth/token", accepted)
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete,
+		http.MethodPut, http.MethodPatch, http.MethodHead, http.MethodOptions} {
+		r.Handle(method, "/grid/session/:sessionId", accepted)
+		r.Handle(method, "/grid/session/:sessionId/*path", accepted)
+	}
+	// These routes deliberately exist so an accidental prefix exemption would
+	// reach them and fail the test, rather than merely returning a router 404.
+	for _, path := range []string{"/admin", "/credentials", "/client-credentials",
+		"/devices", "/device/phone/tap", "/grid/private", "/grid/status/private",
+		"/grid/sessions", "/oauth/token/private"} {
+		r.Any(path, accepted)
+	}
+	r.GET("/grid/session", accepted)
+	r.GET("/oauth/token", accepted)
+	r.PUT("/oauth/token", accepted)
+	r.NoRoute(accepted)
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/grid/status"},
+		{http.MethodPost, "/grid/session"},
+		{http.MethodPost, "/oauth/token"},
+		{http.MethodGet, "/grid/session/owned-session"},
+		{http.MethodDelete, "/grid/session/owned-session"},
+		{http.MethodGet, "/grid/session/owned-session/source"},
+		{http.MethodPost, "/grid/session/owned-session/actions"},
+		{http.MethodDelete, "/grid/session/owned-session/actions"},
+		{http.MethodOptions, "/grid/session/owned-session/actions"},
+	} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != http.StatusNoContent {
+			t.Errorf("native route %s %s blocked: %d", tc.method, tc.path, w.Code)
+		}
+	}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/admin"}, {http.MethodGet, "/credentials"},
+		{http.MethodGet, "/client-credentials"}, {http.MethodGet, "/devices"},
+		{http.MethodPost, "/device/phone/tap"}, {http.MethodGet, "/grid/private"},
+		{http.MethodGet, "/grid/status/private"}, {http.MethodGet, "/grid/sessions"},
+		{http.MethodGet, "/grid/session"}, {http.MethodGet, "/oauth/token"},
+		{http.MethodPut, "/oauth/token"}, {http.MethodGet, "/oauth/token/private"},
+		{http.MethodPost, "/unregistered/grid/session"},
+		{http.MethodTrace, "/grid/session/owned-session/source"},
+		{http.MethodConnect, "/grid/session/owned-session/source"},
+	} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("non-native route %s %s escaped gate: %d", tc.method, tc.path, w.Code)
+		}
+	}
+}
+
 func TestEnterpriseUIPathAllowlist(t *testing.T) {
 	for _, path := range []string{"/devices", "/apps", "/credentials", "/actions", "/appium-grid", "/admin", "/devices/control/971336be0806", "/devices/control/1234-abcd_AB"} {
 		if !allowedEnterpriseUIPath(path) {

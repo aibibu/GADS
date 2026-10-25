@@ -137,6 +137,12 @@ func EnterpriseGate() gin.HandlerFunc {
 		if path == "/provider-update" || path == "/authenticate" || strings.HasPrefix(path, "/enterprise/") {
 			return
 		}
+		if nativeAutomationRoute(c) {
+			// Native Grid handlers validate client credentials and session IDs.
+			// Machine clients have no enterprise browser cookie; keep their
+			// existing authentication instead of redirecting them into OIDC.
+			return
+		}
 		_, signedIn := e.session(c)
 		nativeFrame := c.Request.Method == http.MethodGet && c.GetHeader("Sec-Fetch-Dest") == "iframe" && c.GetHeader("Upgrade") == "" && strings.Contains(c.GetHeader("Accept"), "text/html") && (path == "/" || allowedEnterpriseUIPath(path))
 		if nativeFrame {
@@ -179,6 +185,30 @@ func EnterpriseGate() gin.HandlerFunc {
 		c.Abort()
 	}
 }
+
+// Match only registered machine endpoints and their methods, never a URL prefix.
+// New /grid or /oauth routes stay enterprise-gated unless reviewed here. Passing
+// this gate does not authenticate a client: Grid and OAuth handlers still perform
+// their native credential, workspace, and session validation.
+func nativeAutomationRoute(c *gin.Context) bool {
+	switch c.FullPath() {
+	case "/grid/status":
+		return c.Request.Method == http.MethodGet
+	case "/grid/session", "/oauth/token":
+		return c.Request.Method == http.MethodPost
+	case "/grid/session/:sessionId", "/grid/session/:sessionId/*path":
+		if c.Param("sessionId") == "" {
+			return false
+		}
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodPut,
+			http.MethodPatch, http.MethodHead, http.MethodOptions:
+			return true
+		}
+	}
+	return false
+}
+
 func EnterpriseRoutes(r *gin.Engine) {
 	if Enterprise == nil {
 		return
