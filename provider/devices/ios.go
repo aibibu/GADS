@@ -339,6 +339,17 @@ func (d *IOSDevice) startWebDriverAgent() error {
 		return fmt.Errorf("iOS 17.0-17.3 is not supported - upgrade the device to iOS 17.4+")
 	}
 
+	if usesExternalWDA(d.GetUDID(), os.Getenv("GADS_IOS_EXTERNAL_WDA_UDIDS")) {
+		// A separately managed Xcode runner owns WDA on these explicit devices.
+		// Only installation and launch are skipped: Setup still forwards USB
+		// ports, waits for the real WDA endpoint, configures streaming, and runs
+		// the configured Appium setup before it may mark this device live.
+		if logger.ProviderLogger != nil {
+			logger.ProviderLogger.LogInfof("ios_device_setup", "Attaching to externally started WebDriverAgent for device `%s`", d.GetUDID())
+		}
+		return nil
+	}
+
 	if err := d.installApp(fmt.Sprintf("%s/WebDriverAgent.ipa", config.ProviderConfig.ProviderFolder)); err != nil {
 		logger.ProviderLogger.LogErrorf("ios_device_setup", "Could not install WebDriverAgent on device `%s` - %s", d.GetUDID(), err)
 		d.Reset("Failed to install WebDriverAgent on device.")
@@ -346,6 +357,20 @@ func (d *IOSDevice) startWebDriverAgent() error {
 	}
 	go d.runWDA()
 	return nil
+}
+
+// External WDA ownership is opt-in per exact UDID. Empty entries and shell-style
+// wildcards do not select other devices; an empty list keeps normal provisioning.
+func usesExternalWDA(udid, configuredUDIDs string) bool {
+	if udid == "" {
+		return false
+	}
+	for _, configured := range strings.Split(configuredUDIDs, ",") {
+		if strings.TrimSpace(configured) == udid {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *IOSDevice) waitForWebDriverAgent() error {
